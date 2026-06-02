@@ -25,51 +25,21 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_OUT = ROOT / "reports"
 DEFAULT_STATE = ROOT / "seen_accessions.json"
 DEFAULT_ENV = ROOT / ".env"
+NCBI_LAST_REQUEST_AT = 0.0
+NCBI_MIN_INTERVAL_SECONDS = 0.45
 
 DISEASE_TERMS = [
-    "rheumatoid arthritis",
-    "RA",
-    "systemic lupus erythematosus",
-    "SLE",
-    "lupus",
-    "Sjogren",
-    "Sjögren",
-    "systemic sclerosis",
-    "scleroderma",
-    "myositis",
-    "dermatomyositis",
-    "polymyositis",
-    "vasculitis",
-    "ANCA",
-    "psoriasis",
-    "psoriatic arthritis",
-    "inflammatory bowel disease",
-    "IBD",
-    "Behcet",
-    "Behçet",
-    "Still disease",
-    "ankylosing spondylitis",
-    "spondyloarthritis",
+    "rheumatoid arthritis", "RA", "systemic lupus erythematosus", "SLE", "lupus",
+    "Sjogren", "Sjögren", "systemic sclerosis", "scleroderma", "myositis",
+    "dermatomyositis", "polymyositis", "vasculitis", "ANCA", "psoriasis",
+    "psoriatic arthritis", "inflammatory bowel disease", "IBD", "Behcet", "Behçet",
+    "Still disease", "ankylosing spondylitis", "spondyloarthritis",
 ]
-
 TECH_TERMS = [
-    "single cell",
-    "single-cell",
-    "scRNA-seq",
-    "scrna",
-    "single nucleus",
-    "snRNA-seq",
-    "spatial transcriptomics",
-    "spatial transcriptome",
-    "Visium",
-    "MERFISH",
-    "seqFISH",
-    "Xenium",
-    "CosMx",
-    "Slide-seq",
-    "Stereo-seq",
+    "single cell", "single-cell", "scRNA-seq", "scrna", "single nucleus", "snRNA-seq",
+    "spatial transcriptomics", "spatial transcriptome", "Visium", "MERFISH", "seqFISH",
+    "Xenium", "CosMx", "Slide-seq", "Stereo-seq",
 ]
-
 DISEASE_CATEGORIES = [
     ("RA", ["rheumatoid arthritis", "rheumatoid", "RA"]),
     ("SLE / Lupus nephritis", ["systemic lupus erythematosus", "lupus nephritis", "lupus", "SLE", "LN"]),
@@ -83,7 +53,6 @@ DISEASE_CATEGORIES = [
     ("Still disease", ["Still disease"]),
     ("Spondyloarthritis", ["ankylosing spondylitis", "spondyloarthritis"]),
 ]
-
 RUN_ACCESSION_RE = re.compile(r"\b[SED]RR\d+\b|\b[SED]RX\d+\b|\b[SED]RP\d+\b|\bDRR\d+\b|\bDRX\d+\b|\bDRP\d+\b")
 STUDY_ACCESSION_RE = re.compile(r"\b(?:PRJ[DEN][A-Z]?\d+|GSE\d+|E-MTAB-\d+|SCP\d+)\b")
 
@@ -116,11 +85,38 @@ class Study:
     technology: str
 
 
-def http_json(url: str, timeout: int = 45) -> Any:
+def http_json(url: str, timeout: int = 45, retries: int = 4) -> Any:
     req = urllib.request.Request(url, headers={"User-Agent": "codex-rheum-omics-monitor/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        payload = resp.read().decode("utf-8", errors="replace")
-    return json.loads(payload)
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = resp.read().decode("utf-8", errors="replace")
+            return json.loads(payload)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {429, 500, 502, 503, 504} or attempt >= retries:
+                raise
+            retry_after = exc.headers.get("Retry-After")
+            delay = float(retry_after) if retry_after and retry_after.isdigit() else min(60.0, 2.0 * (2**attempt))
+            time.sleep(delay)
+    raise RuntimeError("unreachable retry loop")
+
+
+def ncbi_wait() -> None:
+    global NCBI_LAST_REQUEST_AT
+    elapsed = time.monotonic() - NCBI_LAST_REQUEST_AT
+    if elapsed < NCBI_MIN_INTERVAL_SECONDS:
+        time.sleep(NCBI_MIN_INTERVAL_SECONDS - elapsed)
+    NCBI_LAST_REQUEST_AT = time.monotonic()
+
+
+def add_ncbi_identity(params: dict[str, str]) -> dict[str, str]:
+    enriched = dict(params)
+    for env_name, param_name in [("NCBI_TOOL", "tool"), ("NCBI_EMAIL", "email"), ("NCBI_API_KEY", "api_key")]:
+        value = os.environ.get(env_name)
+        if value:
+            enriched[param_name] = value
+    enriched.setdefault("tool", "rheum_omics_monitor")
+    return enriched
 
 
 def load_env_file(path: Path = DEFAULT_ENV) -> None:
@@ -228,7 +224,7 @@ def accession_range_label(accessions: tuple[str, ...]) -> str:
 
 
 def ncbi_search(db: str, term: str, since_days: int, retmax: int) -> list[str]:
-    params = {
+    params = add_ncbi_identity({
         "db": db,
         "term": term,
         "retmode": "json",
@@ -236,8 +232,9 @@ def ncbi_search(db: str, term: str, since_days: int, retmax: int) -> list[str]:
         "sort": "pub date",
         "datetype": "pdat",
         "reldate": str(since_days),
-    }
+    })
     url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + urllib.parse.urlencode(params)
+    ncbi_wait()
     data = http_json(url)
     return data.get("esearchresult", {}).get("idlist", [])
 
@@ -245,8 +242,9 @@ def ncbi_search(db: str, term: str, since_days: int, retmax: int) -> list[str]:
 def ncbi_summary(db: str, ids: list[str]) -> dict[str, Any]:
     if not ids:
         return {}
-    params = {"db": db, "id": ",".join(ids), "retmode": "json"}
+    params = add_ncbi_identity({"db": db, "id": ",".join(ids), "retmode": "json"})
     url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?" + urllib.parse.urlencode(params)
+    ncbi_wait()
     return http_json(url).get("result", {})
 
 
@@ -262,19 +260,7 @@ def fetch_ncbi_geo(since_days: int, retmax: int) -> list[Record]:
         if not keep:
             continue
         accession = item.get("accession") or item.get("gse") or uid
-        records.append(
-            Record(
-                accession=str(accession),
-                title=clean_title(title, str(accession)),
-                source="NCBI GEO",
-                url=f"https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={urllib.parse.quote(str(accession))}",
-                published=item.get("PDAT", "") or item.get("pdat", ""),
-                organism=item.get("taxon", ""),
-                technology=tech,
-                disease_hint=disease,
-                summary=summary.strip(),
-            )
-        )
+        records.append(Record(str(accession), clean_title(title, str(accession)), "NCBI GEO", f"https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={urllib.parse.quote(str(accession))}", item.get("PDAT", "") or item.get("pdat", ""), item.get("taxon", ""), tech, disease, summary.strip()))
     return records
 
 
@@ -290,19 +276,7 @@ def fetch_ncbi_sra(since_days: int, retmax: int) -> list[Record]:
         if not keep:
             continue
         accession = extract_accession(item.get("accession") or item.get("runs", "") or item.get("expxml", ""), uid)
-        records.append(
-            Record(
-                accession=accession,
-                title=clean_title(title, str(accession)),
-                source="NCBI SRA",
-                url=f"https://www.ncbi.nlm.nih.gov/sra/?term={urllib.parse.quote(str(accession).split(',', 1)[0])}",
-                published=item.get("publishdate", ""),
-                organism=item.get("organism", ""),
-                technology=tech,
-                disease_hint=disease,
-                summary="SRA run/study matched rheumatology and single-cell/spatial keywords.",
-            )
-        )
+        records.append(Record(accession, clean_title(title, str(accession)), "NCBI SRA", f"https://www.ncbi.nlm.nih.gov/sra/?term={urllib.parse.quote(str(accession).split(',', 1)[0])}", item.get("publishdate", ""), item.get("organism", ""), tech, disease, "SRA run/study matched rheumatology and single-cell/spatial keywords."))
     return records
 
 
@@ -319,19 +293,8 @@ def fetch_cxg(retmax: int) -> list[Record]:
         if not keep:
             continue
         accession = item.get("dataset_id") or item.get("id") or title
-        records.append(
-            Record(
-                accession=str(accession),
-                title=clean_title(title, str(accession)),
-                source="CELLxGENE",
-                url=f"https://cellxgene.cziscience.com/e/{accession}.cxg/",
-                published=item.get("published_at", "") or item.get("created_at", ""),
-                organism=", ".join([o.get("label", "") for o in item.get("organism", []) if isinstance(o, dict)]),
-                technology=tech,
-                disease_hint=disease,
-                summary=summary.strip(),
-            )
-        )
+        organism = ", ".join([o.get("label", "") for o in item.get("organism", []) if isinstance(o, dict)])
+        records.append(Record(str(accession), clean_title(title, str(accession)), "CELLxGENE", f"https://cellxgene.cziscience.com/e/{accession}.cxg/", item.get("published_at", "") or item.get("created_at", ""), organism, tech, disease, summary.strip()))
     return records
 
 
@@ -353,19 +316,7 @@ def fetch_ena(since_days: int, retmax: int) -> list[Record]:
         if not keep:
             continue
         accession = item.get("study_accession") or item.get("secondary_study_accession") or title
-        records.append(
-            Record(
-                accession=str(accession),
-                title=clean_title(title, str(accession)),
-                source="ENA",
-                url=f"https://www.ebi.ac.uk/ena/browser/view/{urllib.parse.quote(str(accession))}",
-                published=item.get("first_public", ""),
-                organism=item.get("scientific_name", ""),
-                technology=tech,
-                disease_hint=disease,
-                summary=summary.strip(),
-            )
-        )
+        records.append(Record(str(accession), clean_title(title, str(accession)), "ENA", f"https://www.ebi.ac.uk/ena/browser/view/{urllib.parse.quote(str(accession))}", item.get("first_public", ""), item.get("scientific_name", ""), tech, disease, summary.strip()))
     return records
 
 
@@ -381,9 +332,12 @@ def collect_records(since_days: int, retmax: int) -> tuple[list[Record], list[st
     for name, fetcher in sources:
         try:
             records.extend(fetcher())
-            time.sleep(0.35)
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-            warnings.append(f"{name}: {exc}")
+            time.sleep(0.6)
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+            if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
+                warnings.append(f"{name}: NCBI/remote service rate-limited this run after retries; this source was skipped temporarily")
+            else:
+                warnings.append(f"{name}: {exc}")
     dedup: dict[str, Record] = {}
     for rec in records:
         dedup.setdefault(rec.key(), rec)
@@ -405,18 +359,16 @@ def build_studies(records: list[Record]) -> list[Study]:
         accessions = sorted({rec.accession for rec in group if rec.accession})
         title_candidates = [rec.title for rec in group if not is_accession_title(rec.title)]
         title = max(title_candidates, key=len) if title_candidates else accession_range_label(tuple(accessions))
-        studies.append(
-            Study(
-                disease=disease,
-                title=title,
-                sources=tuple(sorted({rec.source for rec in group if rec.source})),
-                accessions=tuple(accessions),
-                links=tuple(sorted({rec.url for rec in group if rec.url})),
-                published=sorted({rec.published for rec in group if rec.published}, reverse=True)[0] if any(rec.published for rec in group) else "",
-                organism=", ".join(sorted({rec.organism for rec in group if rec.organism})),
-                technology=", ".join(sorted({rec.technology for rec in group if rec.technology})),
-            )
-        )
+        studies.append(Study(
+            disease=disease,
+            title=title,
+            sources=tuple(sorted({rec.source for rec in group if rec.source})),
+            accessions=tuple(accessions),
+            links=tuple(sorted({rec.url for rec in group if rec.url})),
+            published=sorted({rec.published for rec in group if rec.published}, reverse=True)[0] if any(rec.published for rec in group) else "",
+            organism=", ".join(sorted({rec.organism for rec in group if rec.organism})),
+            technology=", ".join(sorted({rec.technology for rec in group if rec.technology})),
+        ))
     disease_order = {name: index for index, (name, _) in enumerate(DISEASE_CATEGORIES)}
     return sorted(studies, key=lambda s: (disease_order.get(s.disease, 999), s.title.casefold(), s.published))
 
@@ -432,10 +384,7 @@ def load_seen(path: Path) -> set[str]:
 
 
 def save_seen(path: Path, keys: set[str]) -> None:
-    path.write_text(
-        json.dumps({"updated_at": dt.datetime.now().isoformat(timespec="seconds"), "seen": sorted(keys)}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps({"updated_at": dt.datetime.now().isoformat(timespec="seconds"), "seen": sorted(keys)}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def render_markdown(records: list[Record], warnings: list[str], since_days: int, only_new: bool) -> str:
@@ -460,17 +409,15 @@ def render_markdown(records: list[Record], warnings: list[str], since_days: int,
             index_by_disease[current_disease] = 0
             lines.extend([f"## {current_disease}", ""])
         index_by_disease[current_disease] += 1
-        lines.extend(
-            [
-                f"### {index_by_disease[current_disease]}. {study.title}",
-                f"- 数据库：{', '.join(study.sources)}",
-                f"- Accession：{'; '.join(study.accessions) if study.accessions else '未提供'}",
-                f"- 疾病：{study.disease}",
-                f"- 发布时间：{study.published or '未提供'}",
-                f"- 物种：{study.organism or '未提供'}",
-                f"- 技术类型：{study.technology or '未判定'}",
-            ]
-        )
+        lines.extend([
+            f"### {index_by_disease[current_disease]}. {study.title}",
+            f"- 数据库：{', '.join(study.sources)}",
+            f"- Accession：{'; '.join(study.accessions) if study.accessions else '未提供'}",
+            f"- 疾病：{study.disease}",
+            f"- 发布时间：{study.published or '未提供'}",
+            f"- 物种：{study.organism or '未提供'}",
+            f"- 技术类型：{study.technology or '未判定'}",
+        ])
         if study.links:
             links = "；".join(study.links[:3])
             if len(study.links) > 3:
@@ -485,7 +432,7 @@ def render_markdown(records: list[Record], warnings: list[str], since_days: int,
 
 
 def send_email(subject: str, body: str) -> None:
-    host = os.environ.get("SMTP_HOST", "smtp.163.com")
+    host = os.environ.get("SMTP_HOST", "smtp.qq.com")
     port = int(os.environ.get("SMTP_PORT", "465"))
     user = os.environ.get("SMTP_USER", "")
     auth_code = os.environ.get("SMTP_AUTH_CODE", "")
@@ -499,8 +446,7 @@ def send_email(subject: str, body: str) -> None:
     msg["To"] = recipient
     msg.set_content(body)
 
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL(host, port, context=context, timeout=60) as smtp:
+    with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context(), timeout=60) as smtp:
         smtp.login(user, auth_code)
         smtp.send_message(msg)
 
@@ -518,10 +464,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     if args.test_email:
-        send_email(
-            "风湿免疫单细胞/空间转录组监控：163 SMTP 测试",
-            "这是一封测试邮件。收到此邮件说明 SMTP_HOST、SMTP_PORT、SMTP_USER、SMTP_AUTH_CODE、REPORT_TO_EMAIL 配置可用。",
-        )
+        send_email("风湿免疫单细胞/空间转录组监控：SMTP 测试", "这是一封测试邮件。收到此邮件说明 SMTP 配置可用。")
         print("test_email=sent")
         return 0
 
