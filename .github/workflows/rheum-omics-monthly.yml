@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      SMTP_HOST: ${{ secrets.SMTP_HOST || 'smtp.gmail.com' }}
+      SMTP_HOST: ${{ secrets.SMTP_HOST || 'smtp.qq.com' }}
       SMTP_PORT: ${{ secrets.SMTP_PORT || '465' }}
       SMTP_USER: ${{ secrets.SMTP_USER }}
       SMTP_AUTH_CODE: ${{ secrets.SMTP_AUTH_CODE }}
