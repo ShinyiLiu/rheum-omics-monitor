@@ -1,4 +1,4 @@
-name: Rheum omics monthly report
+name: Rheum omics biweekly report
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
       - ".github/workflows/rheum-omics-monthly.yml"
       - "rheum_omics_monitor/**"
   schedule:
-    - cron: "0 1 1 * *"
+    - cron: "0 1 1,15 * *"
 
 jobs:
   report:
@@ -21,6 +21,8 @@ jobs:
       SMTP_USER: ${{ secrets.SMTP_USER }}
       SMTP_AUTH_CODE: ${{ secrets.SMTP_AUTH_CODE }}
       REPORT_TO_EMAIL: ${{ secrets.REPORT_TO_EMAIL }}
+      NCBI_EMAIL: ${{ secrets.NCBI_EMAIL }}
+      NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -35,7 +37,7 @@ jobs:
 
       - name: Generate report only on push
         if: github.event_name == 'push'
-        run: python rheum_omics_monitor/monitor.py --since-days 7 --include-seen
+        run: python rheum_omics_monitor/monitor.py --since-days 7 --include-seen --retmax 40
 
       - name: Validate email secrets
         if: github.event_name != 'push'
@@ -59,6 +61,8 @@ jobs:
           print(f"SMTP_USER domain: {domain}")
           print(f"SMTP_AUTH_CODE length: {len(auth_code)}")
           print(f"REPORT_TO_EMAIL has at sign: {'@' in recipient}")
+          print(f"NCBI_EMAIL configured: {bool(os.environ.get('NCBI_EMAIL'))}")
+          print(f"NCBI_API_KEY configured: {bool(os.environ.get('NCBI_API_KEY'))}")
           PY
           echo "SMTP_HOST=${SMTP_HOST}"
           echo "SMTP_PORT=${SMTP_PORT}"
@@ -82,6 +86,6 @@ jobs:
           print("SMTP login succeeded")
           PY
 
-      - name: Send monthly report
+      - name: Send biweekly report
         if: github.event_name != 'push'
-        run: python rheum_omics_monitor/monitor.py --since-days 35 --send-email
+        run: python rheum_omics_monitor/monitor.py --since-days 14 --retmax 40 --send-email
