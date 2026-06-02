@@ -2,6 +2,12 @@ name: Rheum omics monthly report
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/rheum-omics-monthly.yml"
+      - "rheum_omics_monitor/**"
   schedule:
     - cron: "0 1 1 * *"
 
