@@ -24,7 +24,34 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Check Python syntax
+        run: python -m py_compile rheum_omics_monitor/monitor.py
+
+      - name: Generate report only on push
+        if: github.event_name == 'push'
+        run: python rheum_omics_monitor/monitor.py --since-days 7 --include-seen
+
+      - name: Validate SMTP secrets
+        if: github.event_name != 'push'
+        shell: bash
+        run: |
+          missing=0
+          for name in SMTP_HOST SMTP_PORT SMTP_USER SMTP_AUTH_CODE REPORT_TO_EMAIL; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing GitHub Actions secret: ${name}"
+              missing=1
+            fi
+          done
+          exit "$missing"
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_AUTH_CODE: ${{ secrets.SMTP_AUTH_CODE }}
+          REPORT_TO_EMAIL: ${{ secrets.REPORT_TO_EMAIL }}
+
       - name: Send monthly report
+        if: github.event_name != 'push'
         run: python rheum_omics_monitor/monitor.py --since-days 35 --send-email
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
