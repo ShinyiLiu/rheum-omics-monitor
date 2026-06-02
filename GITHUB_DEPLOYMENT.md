@@ -2,9 +2,9 @@
 
 这个仓库可以通过 GitHub Actions 在云端每月发送一次风湿免疫单细胞/空间转录组公共数据报告。本地电脑不需要开机。
 
-## 1. 创建私有仓库
+## 1. 仓库内容
 
-建议创建 GitHub 私有仓库，然后把当前工作区中这些内容上传：
+云端运行需要以下文件：
 
 - `.github/workflows/rheum-omics-monthly.yml`
 - `rheum_omics_monitor/monitor.py`
@@ -20,17 +20,15 @@
 
 `Settings -> Secrets and variables -> Actions -> New repository secret`
 
-添加以下 5 个 secret：
+只需要添加以下 3 个 secret：
 
 ```text
-SMTP_HOST=smtp.163.com
-SMTP_PORT=465
 SMTP_USER=你的163邮箱
 SMTP_AUTH_CODE=你的163客户端授权码
 REPORT_TO_EMAIL=接收报告的邮箱
 ```
 
-`SMTP_AUTH_CODE` 使用 163 客户端授权码，不使用邮箱登录密码。
+workflow 已固定使用 163 默认 SMTP 设置：`smtp.163.com:465`。`SMTP_AUTH_CODE` 使用 163 客户端授权码，不使用邮箱登录密码。
 
 ## 3. 定时规则
 
@@ -44,11 +42,17 @@ GitHub Actions 的 cron 使用 UTC 时间。这个规则对应北京时间每月
 
 ## 4. 手动测试
 
-上传后，在 GitHub 仓库页面进入：
+在 GitHub 仓库页面进入：
 
 `Actions -> Rheum omics monthly report -> Run workflow`
 
 手动运行一次。运行成功后，邮箱应收到报告。
+
+如果失败，先看失败 step：
+
+- `Validate email secrets`：说明 secret 名称缺失或写错。
+- `Check SMTP login`：说明 163 SMTP 连接或授权码登录失败。
+- `Send monthly report`：说明检索或正式发信阶段失败。
 
 ## 5. 注意事项
 
