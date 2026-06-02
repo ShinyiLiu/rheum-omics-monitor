@@ -14,21 +14,27 @@
 
 不要上传 `rheum_omics_monitor/.env`、`reports/`、`seen_accessions.json`。
 
-## 2. 配置 Actions Secrets
+## 2. 配置 Gmail Actions Secrets
+
+workflow 默认使用 Gmail SMTP：`smtp.gmail.com:465`。
+
+你需要先在 Google 账号中开启两步验证，然后生成 App Password。Google 官方说明：Gmail SMTP 使用 `smtp.gmail.com`，SSL 端口 `465`；第三方应用应使用 App Password。
 
 在 GitHub 仓库页面进入：
 
 `Settings -> Secrets and variables -> Actions -> New repository secret`
 
-只需要添加以下 3 个 secret：
+添加以下 3 个 secret：
 
 ```text
-SMTP_USER=你的163邮箱
-SMTP_AUTH_CODE=你的163客户端授权码
+SMTP_USER=你的Gmail地址
+SMTP_AUTH_CODE=你的Gmail App Password
 REPORT_TO_EMAIL=接收报告的邮箱
 ```
 
-workflow 已固定使用 163 默认 SMTP 设置：`smtp.163.com:465`。`SMTP_AUTH_CODE` 使用 163 客户端授权码，不使用邮箱登录密码。
+Gmail App Password 通常是 16 位字符。粘贴到 GitHub Secret 时可以去掉空格。
+
+可选覆盖项：如果以后不用 Gmail，可以额外添加 `SMTP_HOST` 和 `SMTP_PORT`。
 
 ## 3. 定时规则
 
@@ -51,7 +57,7 @@ GitHub Actions 的 cron 使用 UTC 时间。这个规则对应北京时间每月
 如果失败，先看失败 step：
 
 - `Validate email secrets`：说明 secret 名称缺失或写错。
-- `Check SMTP login`：说明 163 SMTP 连接或授权码登录失败。
+- `Check SMTP login`：说明 Gmail SMTP 连接或 App Password 登录失败。
 - `Send monthly report`：说明检索或正式发信阶段失败。
 
 ## 5. 注意事项
