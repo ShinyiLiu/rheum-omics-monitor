@@ -1,6 +1,6 @@
 # GitHub Actions 云端定时发送配置
 
-这个仓库可以通过 GitHub Actions 在云端每月发送一次风湿免疫单细胞/空间转录组公共数据报告。本地电脑不需要开机。
+这个仓库可以通过 GitHub Actions 在云端每两周左右发送一次风湿免疫单细胞/空间转录组公共数据报告。本地电脑不需要开机。
 
 ## 1. 仓库内容
 
@@ -39,21 +39,32 @@ SMTP_HOST=smtp.exmail.qq.com
 SMTP_PORT=465
 ```
 
-## 3. 定时规则
+## 3. NCBI 限流缓解
+
+GitHub Actions 使用共享云端 IP，偶尔会遇到 NCBI `HTTP 429 Too Many Requests`。脚本已经加入限速和退避重试；如果仍频繁出现，可以额外添加：
+
+```text
+NCBI_EMAIL=你的联系邮箱
+NCBI_API_KEY=你的 NCBI API key
+```
+
+`NCBI_API_KEY` 不是必须项，但能提高 NCBI E-utilities 的稳定性。
+
+## 4. 定时规则
 
 workflow 已配置：
 
 ```yaml
-cron: "0 1 1 * *"
+cron: "0 1 1,15 * *"
 ```
 
-GitHub Actions 的 cron 使用 UTC 时间。这个规则对应北京时间每月 1 日 09:00。
+GitHub Actions 的 cron 使用 UTC 时间。这个规则对应北京时间每月 1 日和 15 日 09:00。每次检索最近 14 天，并把每个数据源请求上限降为 40 条。
 
-## 4. 手动测试
+## 5. 手动测试
 
 在 GitHub 仓库页面进入：
 
-`Actions -> Rheum omics monthly report -> Run workflow`
+`Actions -> Rheum omics biweekly report -> Run workflow`
 
 手动运行一次。运行成功后，邮箱应收到报告。
 
@@ -61,9 +72,9 @@ GitHub Actions 的 cron 使用 UTC 时间。这个规则对应北京时间每月
 
 - `Validate email secrets`：说明 secret 名称缺失或写错。
 - `Check SMTP login`：说明 QQ 邮箱 SMTP 连接或授权码登录失败。
-- `Send monthly report`：说明检索或正式发信阶段失败。
+- `Send biweekly report`：说明检索或正式发信阶段失败。
 
-## 5. 注意事项
+## 6. 注意事项
 
 - GitHub Actions 定时任务可能有几分钟延迟。
 - 如果仓库长期无活动，GitHub 可能暂停 scheduled workflow；进入 Actions 页面可重新启用。
