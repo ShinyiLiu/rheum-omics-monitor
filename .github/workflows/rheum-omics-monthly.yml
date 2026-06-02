@@ -15,6 +15,12 @@ jobs:
   report:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      SMTP_HOST: smtp.163.com
+      SMTP_PORT: "465"
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_AUTH_CODE: ${{ secrets.SMTP_AUTH_CODE }}
+      REPORT_TO_EMAIL: ${{ secrets.REPORT_TO_EMAIL }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -31,31 +37,41 @@ jobs:
         if: github.event_name == 'push'
         run: python rheum_omics_monitor/monitor.py --since-days 7 --include-seen
 
-      - name: Validate SMTP secrets
+      - name: Validate email secrets
         if: github.event_name != 'push'
         shell: bash
         run: |
           missing=0
-          for name in SMTP_HOST SMTP_PORT SMTP_USER SMTP_AUTH_CODE REPORT_TO_EMAIL; do
+          for name in SMTP_USER SMTP_AUTH_CODE REPORT_TO_EMAIL; do
             if [ -z "${!name}" ]; then
               echo "::error::Missing GitHub Actions secret: ${name}"
               missing=1
+            else
+              echo "${name} is configured"
             fi
           done
+          echo "SMTP_HOST=${SMTP_HOST}"
+          echo "SMTP_PORT=${SMTP_PORT}"
           exit "$missing"
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_AUTH_CODE: ${{ secrets.SMTP_AUTH_CODE }}
-          REPORT_TO_EMAIL: ${{ secrets.REPORT_TO_EMAIL }}
+
+      - name: Check SMTP login
+        if: github.event_name != 'push'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import smtplib
+          import ssl
+          host = os.environ["SMTP_HOST"]
+          port = int(os.environ["SMTP_PORT"])
+          user = os.environ["SMTP_USER"]
+          auth_code = os.environ["SMTP_AUTH_CODE"]
+          print(f"Connecting to {host}:{port} as configured SMTP_USER")
+          with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context(), timeout=60) as smtp:
+              smtp.login(user, auth_code)
+          print("SMTP login succeeded")
+          PY
 
       - name: Send monthly report
         if: github.event_name != 'push'
         run: python rheum_omics_monitor/monitor.py --since-days 35 --send-email
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_AUTH_CODE: ${{ secrets.SMTP_AUTH_CODE }}
-          REPORT_TO_EMAIL: ${{ secrets.REPORT_TO_EMAIL }}
