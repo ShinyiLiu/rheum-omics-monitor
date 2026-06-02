@@ -16,10 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      SMTP_HOST: ${{ secrets.SMTP_HOST || 'smtp.163.com' }}
+      SMTP_HOST: ${{ secrets.SMTP_HOST || 'smtp.gmail.com' }}
       SMTP_PORT: ${{ secrets.SMTP_PORT || '465' }}
       SMTP_USER: ${{ secrets.SMTP_USER }}
-      SMTP_LOGIN_USER: ${{ secrets.SMTP_LOGIN_USER }}
       SMTP_AUTH_CODE: ${{ secrets.SMTP_AUTH_CODE }}
       REPORT_TO_EMAIL: ${{ secrets.REPORT_TO_EMAIL }}
     steps:
@@ -60,7 +59,6 @@ jobs:
           print(f"SMTP_USER domain: {domain}")
           print(f"SMTP_AUTH_CODE length: {len(auth_code)}")
           print(f"REPORT_TO_EMAIL has at sign: {'@' in recipient}")
-          print(f"SMTP_LOGIN_USER configured: {bool(os.environ.get('SMTP_LOGIN_USER'))}")
           PY
           echo "SMTP_HOST=${SMTP_HOST}"
           echo "SMTP_PORT=${SMTP_PORT}"
@@ -78,24 +76,10 @@ jobs:
           port = int(os.environ["SMTP_PORT"])
           user = os.environ["SMTP_USER"]
           auth_code = os.environ["SMTP_AUTH_CODE"]
-          candidates = []
-          if os.environ.get("SMTP_LOGIN_USER"):
-              candidates.append(("SMTP_LOGIN_USER", os.environ["SMTP_LOGIN_USER"] ))
-          candidates.append(("SMTP_USER", user))
-          if "@" in user:
-              candidates.append(("SMTP_USER local part", user.split("@", 1)[0]))
-          last_error = None
-          for label, login_user in candidates:
-              try:
-                  print(f"Trying SMTP login with {label}")
-                  with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context(), timeout=60) as smtp:
-                      smtp.login(login_user, auth_code)
-                  print(f"SMTP login succeeded with {label}")
-                  raise SystemExit(0)
-              except smtplib.SMTPAuthenticationError as exc:
-                  last_error = exc
-                  print(f"SMTP authentication failed with {label}: code={exc.smtp_code!r}")
-          raise SystemExit(f"All SMTP login attempts failed. Last error: {last_error}")
+          print(f"Trying SMTP login to {host}:{port} with SMTP_USER")
+          with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context(), timeout=60) as smtp:
+              smtp.login(user, auth_code)
+          print("SMTP login succeeded")
           PY
 
       - name: Send monthly report
