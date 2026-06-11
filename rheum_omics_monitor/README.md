@@ -48,17 +48,24 @@ python .\rheum_omics_monitor\monitor.py --since-days 14 --send-email
 
 报告会写入 `rheum_omics_monitor/reports/`。脚本会维护 `seen_accessions.json`，默认邮件只发送首次发现的数据集。
 
+脚本还会维护两个 CSV 台账：
+
+- `data/rheum_omics_all_datasets.csv`：全量长期台账，包含既往邮件和最新运行发现过的所有数据集。
+- `data/rheum_omics_latest_email_datasets.csv`：本次邮件实际发送的新数据集列表，也会作为 CSV 附件随邮件发送；如果本次没有新增数据集，则只包含表头。
+
+如需覆盖默认路径，可使用 `--registry-file` 指定全量台账路径，用 `--latest-file` 指定邮件附件 CSV 路径。
+
 ## GitHub Actions 云端运行
 
 仓库根目录已包含 `.github/workflows/rheum-omics-monthly.yml`，可以在 GitHub Actions 云端每月 1 日和 15 日北京时间 09:00 自动运行，每次检索过去 14 天。
 
 云端运行时不要上传 `.env`，而是在 GitHub 仓库的 Actions Secrets 中配置：
 
+- `SMTP_HOST`
+- `SMTP_PORT`
 - `SMTP_USER`
 - `SMTP_AUTH_CODE`
 - `REPORT_TO_EMAIL`
-- `SMTP_HOST`（可选，默认 `smtp.qq.com`）
-- `SMTP_PORT`（可选，默认 `465`）
 - `NCBI_EMAIL`（可选）
 - `NCBI_API_KEY`（可选）
 
@@ -71,4 +78,4 @@ python .\rheum_omics_monitor\monitor.py --since-days 14 --send-email
 - ENA
 - CELLxGENE Discover
 
-脚本会先用数据库接口拉取候选记录，再在本地用风湿免疫疾病关键词和单细胞/空间转录组关键词二次过滤，避免把 bulk RNA-seq 混入报告。
+脚本会先用数据库接口拉取候选记录，再在本地用风湿免疫疾病关键词和单细胞/空间转录组关键词二次过滤，避免把 bulk RNA-seq 混入周报。

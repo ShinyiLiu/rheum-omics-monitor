@@ -28,7 +28,9 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_OUT = ROOT / "reports"
 DEFAULT_STATE = ROOT / "seen_accessions.json"
 DEFAULT_ENV = ROOT / ".env"
-DEFAULT_REGISTRY = ROOT.parent / "data" / "rheum_omics_datasets.csv"
+DEFAULT_REGISTRY = ROOT.parent / "data" / "rheum_omics_all_datasets.csv"
+DEFAULT_LATEST = ROOT.parent / "data" / "rheum_omics_latest_email_datasets.csv"
+LEGACY_REGISTRY = ROOT.parent / "data" / "rheum_omics_datasets.csv"
 NCBI_LAST_REQUEST_AT = 0.0
 NCBI_MIN_INTERVAL_SECONDS = 0.45
 
@@ -111,6 +113,9 @@ DISEASE_CATEGORIES = [
 
 RUN_ACCESSION_RE = re.compile(r'\b[SED]RR\d+\b|\b[SED]RX\d+\b|\b[SED]RP\d+\b|\bDRR\d+\b|\bDRX\d+\b|\bDRP\d+\b')
 STUDY_ACCESSION_RE = re.compile(r'\b(?:PRJ[DEN][A-Z]?\d+|GSE\d+|E-MTAB-\d+|SCP\d+)\b')
+BIOSAMPLE_ACCESSION_RE = re.compile(r"\bSAM[NED][A-Z]?\d+\b|\bSAMEA\d+\b|\bSAMD\d+\b", re.IGNORECASE)
+SRA_SAMPLE_ACCESSION_RE = re.compile(r"\b[SED]RS\d+\b|\bDRS\d+\b", re.IGNORECASE)
+GEO_SAMPLE_ACCESSION_RE = re.compile(r"\bGSM\d+\b", re.IGNORECASE)
 
 TITLE_TRANSLATIONS = [
     ("single-cell RNA sequencing", "单细胞RNA测序"),
@@ -205,6 +210,8 @@ class Record:
     technology: str = ""
     disease_hint: str = ""
     summary: str = ""
+    sample_size: str = ""
+    sample_size_note: str = ""
 
     def key(self) -> str:
         return f"{self.source}:{self.accession}"
@@ -336,6 +343,137 @@ def extract_accession(candidate: str, fallback: str) -> str:
     return fallback
 
 
+def positive_int(value: Any) -> str:
+    if isinstance(value, int) and value > 0:
+        return str(value)
+    if isinstance(value, float) and value.is_integer() and value > 0:
+        return str(int(value))
+    if isinstance(value, str):
+        text = value.strip().replace(",", "")
+        if re.fullmatch(r"\d+", text) and int(text) > 0:
+            return str(int(text))
+    return ""
+
+
+def walk_metadata(value: Any) -> Any:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield key, child
+            yield from walk_metadata(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield "", child
+            yield from walk_metadata(child)
+
+
+def metadata_sample_count(item: Any) -> tuple[str, str]:
+    direct_count_keys = {
+        "sample_count",
+        "samplecount",
+        "samples_count",
+        "number_of_samples",
+        "numberofsamples",
+        "n_samples",
+        "nsamples",
+        "num_samples",
+        "sample size",
+        "sample_size",
+    }
+    for key, value in walk_metadata(item):
+        normalized = str(key).casefold().replace("-", "_").replace(" ", "_")
+        if normalized in direct_count_keys:
+            count = positive_int(value)
+            if count:
+                return count, f"sample_size from {key}"
+        if normalized in {"samples", "sample", "donors", "donor"} and isinstance(value, list):
+            identifiers = {
+                str(entry.get("id") or entry.get("accession") or entry.get("label") or entry)
+                for entry in value
+                if isinstance(entry, (str, int, float, dict))
+            }
+            identifiers.discard("")
+            if identifiers:
+                return str(len(identifiers)), f"sample_size from {key}"
+    return "", ""
+
+
+def regex_sample_count(text: str, patterns: list[re.Pattern[str]], note: str) -> tuple[str, str]:
+    accessions: set[str] = set()
+    for pattern in patterns:
+        accessions.update(match.upper() for match in pattern.findall(text or ""))
+    if accessions:
+        return str(len(accessions)), note
+    return "", ""
+
+
+def infer_geo_sample_size(item: dict[str, Any], title: str, summary: str) -> tuple[str, str]:
+    count, note = metadata_sample_count(item)
+    if count:
+        return count, note
+    payload = json.dumps(item, ensure_ascii=False) + "\n" + title + "\n" + summary
+    return regex_sample_count(payload, [GEO_SAMPLE_ACCESSION_RE], "sample_size from GEO sample accessions")
+
+
+def infer_sra_sample_size(item: dict[str, Any]) -> tuple[str, str]:
+    payload = "\n".join(str(item.get(name, "")) for name in ("expxml", "runs", "accession", "title"))
+    count, note = regex_sample_count(payload, [BIOSAMPLE_ACCESSION_RE], "sample_size from BioSample accessions")
+    if count:
+        return count, note
+    return regex_sample_count(payload, [SRA_SAMPLE_ACCESSION_RE], "sample_size from SRA sample accessions")
+
+
+def infer_cxg_sample_size(item: dict[str, Any]) -> tuple[str, str]:
+    count, note = metadata_sample_count(item)
+    if count:
+        return count, note
+
+    identifiers: set[str] = set()
+    for key, value in walk_metadata(item):
+        normalized = str(key).casefold()
+        if "cell" in normalized:
+            continue
+        if any(token in normalized for token in ("donor", "sample")):
+            if isinstance(value, str) and value.strip():
+                identifiers.add(value.strip())
+            elif isinstance(value, list):
+                for entry in value:
+                    if isinstance(entry, str) and entry.strip():
+                        identifiers.add(entry.strip())
+                    elif isinstance(entry, dict):
+                        candidate = entry.get("id") or entry.get("accession") or entry.get("label")
+                        if candidate:
+                            identifiers.add(str(candidate))
+    if identifiers:
+        return str(len(identifiers)), "sample_size from CELLxGENE sample/donor identifiers"
+    return "", ""
+
+
+def fetch_ena_sample_size(study_accession: str) -> tuple[str, str]:
+    if not study_accession:
+        return "", ""
+    params = {
+        "result": "read_run",
+        "query": f'study_accession="{study_accession}" OR secondary_study_accession="{study_accession}"',
+        "fields": "sample_accession",
+        "format": "json",
+        "limit": "100000",
+    }
+    url = "https://www.ebi.ac.uk/ena/portal/api/search?" + urllib.parse.urlencode(params)
+    try:
+        data = http_json(url)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError, OSError):
+        return "", ""
+    samples = {
+        str(item.get("sample_accession", "")).strip()
+        for item in data
+        if isinstance(item, dict) and item.get("sample_accession")
+    }
+    samples.discard("")
+    if samples:
+        return str(len(samples)), "sample_size from ENA sample_accession"
+    return "", ""
+
+
 def normalize_study_title(title: str) -> str:
     folded = re.sub(r"[^a-z0-9]+", " ", title.casefold()).strip()
     folded = re.sub(r"\b(?:single cell|single nucleus|scrna seq|snrna seq|rna seq|dataset|data)\b", " ", folded)
@@ -427,6 +565,7 @@ def fetch_ncbi_geo(since_days: int, retmax: int) -> list[Record]:
         if not keep:
             continue
         accession = item.get("accession") or item.get("gse") or uid
+        sample_size, sample_size_note = infer_geo_sample_size(item, title, summary)
         records.append(
             Record(
                 accession=accession,
@@ -438,6 +577,8 @@ def fetch_ncbi_geo(since_days: int, retmax: int) -> list[Record]:
                 technology=tech,
                 disease_hint=disease,
                 summary=summary.strip(),
+                sample_size=sample_size,
+                sample_size_note=sample_size_note,
             )
         )
     return records
@@ -459,6 +600,7 @@ def fetch_ncbi_sra(since_days: int, retmax: int) -> list[Record]:
             item.get("accession") or item.get("runs", "") or item.get("expxml", ""),
             uid,
         )
+        sample_size, sample_size_note = infer_sra_sample_size(item)
         records.append(
             Record(
                 accession=accession,
@@ -470,6 +612,8 @@ def fetch_ncbi_sra(since_days: int, retmax: int) -> list[Record]:
                 technology=tech,
                 disease_hint=disease,
                 summary="SRA run/study matched rheumatology and single-cell/spatial keywords.",
+                sample_size=sample_size,
+                sample_size_note=sample_size_note,
             )
         )
     return records
@@ -489,6 +633,7 @@ def fetch_cxg(retmax: int) -> list[Record]:
         if not keep:
             continue
         accession = item.get("dataset_id") or item.get("id") or title
+        sample_size, sample_size_note = infer_cxg_sample_size(item)
         records.append(
             Record(
                 accession=accession,
@@ -500,6 +645,8 @@ def fetch_cxg(retmax: int) -> list[Record]:
                 technology=tech,
                 disease_hint=disease,
                 summary=summary.strip(),
+                sample_size=sample_size,
+                sample_size_note=sample_size_note,
             )
         )
     return records
@@ -527,6 +674,7 @@ def fetch_ena(since_days: int, retmax: int) -> list[Record]:
         if not keep:
             continue
         accession = item.get("study_accession") or item.get("secondary_study_accession") or title
+        sample_size, sample_size_note = fetch_ena_sample_size(str(accession))
         records.append(
             Record(
                 accession=accession,
@@ -538,6 +686,8 @@ def fetch_ena(since_days: int, retmax: int) -> list[Record]:
                 technology=tech,
                 disease_hint=disease,
                 summary=summary.strip(),
+                sample_size=sample_size,
+                sample_size_note=sample_size_note,
             )
         )
     return records
@@ -686,13 +836,55 @@ def score_record(rec: Record) -> int:
     return min(score, 100)
 
 
+def registry_row_for_record(rec: Record, today: str, existing: dict[str, str] | None = None) -> dict[str, str]:
+    text = f"{rec.title}\n{rec.summary}\n{rec.disease_hint}\n{rec.organism}\n{rec.technology}"
+    disease = rec.disease_hint or classify_disease(text)[0]
+    flags = infer_flags(text)
+    row = dict(existing or {field: "" for field in REGISTRY_FIELDS})
+    if not row.get("first_seen"):
+        row["first_seen"] = today
+    notes = "auto-collected from public metadata"
+    if rec.sample_size_note:
+        notes += f"; {rec.sample_size_note}"
+    row.update(
+        {
+            "accession": rec.accession,
+            "title": rec.title,
+            "disease": disease,
+            "source": rec.source,
+            "technology": rec.technology,
+            "tissue": infer_tissue(text),
+            "species": rec.organism,
+            "has_control": flags["has_control"],
+            "has_clinical_info": flags["has_clinical_info"],
+            "has_processed_matrix": flags["has_processed_matrix"],
+            "sample_size": rec.sample_size or row.get("sample_size", ""),
+            "score": str(score_record(rec)),
+            "last_seen": today,
+            "url": rec.url,
+            "notes": notes,
+        }
+    )
+    return row
+
+
+def write_registry_rows(path: Path, rows: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=REGISTRY_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def update_registry(records: list[Record], registry_file: Path) -> None:
     registry_file.parent.mkdir(parents=True, exist_ok=True)
     today = dt.date.today().isoformat()
     existing: dict[tuple[str, str], dict[str, str]] = {}
 
-    if registry_file.exists():
-        with registry_file.open("r", newline="", encoding="utf-8") as handle:
+    use_legacy_registry = registry_file == DEFAULT_REGISTRY and not registry_file.exists()
+    source_file = LEGACY_REGISTRY if use_legacy_registry else registry_file
+    if source_file.exists():
+        with source_file.open("r", newline="", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
                 normalized = {field: row.get(field, "") for field in REGISTRY_FIELDS}
@@ -702,38 +894,17 @@ def update_registry(records: list[Record], registry_file: Path) -> None:
 
     for rec in records:
         key = (rec.accession, rec.source)
-        text = f"{rec.title}\n{rec.summary}\n{rec.disease_hint}\n{rec.organism}\n{rec.technology}"
-        disease = rec.disease_hint or classify_disease(text)[0]
-        flags = infer_flags(text)
-        row = existing.get(key, {field: "" for field in REGISTRY_FIELDS})
-        if not row.get("first_seen"):
-            row["first_seen"] = today
-        row.update(
-            {
-                "accession": rec.accession,
-                "title": rec.title,
-                "disease": disease,
-                "source": rec.source,
-                "technology": rec.technology,
-                "tissue": infer_tissue(text),
-                "species": rec.organism,
-                "has_control": flags["has_control"],
-                "has_clinical_info": flags["has_clinical_info"],
-                "has_processed_matrix": flags["has_processed_matrix"],
-                "sample_size": row.get("sample_size", ""),
-                "score": str(score_record(rec)),
-                "last_seen": today,
-                "url": rec.url,
-                "notes": "auto-collected from public metadata",
-            }
-        )
-        existing[key] = row
+        existing[key] = registry_row_for_record(rec, today, existing.get(key))
 
     rows = sorted(existing.values(), key=lambda row: (row.get("source", ""), row.get("accession", "")))
-    with registry_file.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=REGISTRY_FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
+    write_registry_rows(registry_file, rows)
+
+
+def write_latest_csv(records: list[Record], latest_file: Path) -> None:
+    today = dt.date.today().isoformat()
+    rows = [registry_row_for_record(rec, today) for rec in records]
+    rows.sort(key=lambda row: (row.get("source", ""), row.get("accession", "")))
+    write_registry_rows(latest_file, rows)
 
 
 def record_value_note(rec: Record) -> str:
@@ -789,7 +960,7 @@ def render_markdown(records: list[Record], warnings: list[str], since_days: int,
     return "\n".join(lines)
 
 
-def send_email(subject: str, body: str) -> None:
+def send_email(subject: str, body: str, attachments: list[Path] | None = None) -> None:
     host = os.environ.get("SMTP_HOST", "smtp.qq.com")
     port = int(os.environ.get("SMTP_PORT", "465"))
     user = os.environ.get("SMTP_USER", "")
@@ -803,6 +974,14 @@ def send_email(subject: str, body: str) -> None:
     msg["From"] = user
     msg["To"] = recipient
     msg.set_content(body)
+    for attachment in attachments or []:
+        if attachment.exists():
+            msg.add_attachment(
+                attachment.read_bytes(),
+                maintype="text",
+                subtype="csv",
+                filename=attachment.name,
+            )
 
     context = ssl.create_default_context()
     with smtplib.SMTP_SSL(host, port, context=context, timeout=60) as smtp:
@@ -818,6 +997,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--state-file", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--registry-file", type=Path, default=DEFAULT_REGISTRY)
+    parser.add_argument("--latest-file", type=Path, default=DEFAULT_LATEST)
     parser.add_argument("--send-email", action="store_true", help="Send report through SMTP.")
     parser.add_argument("--test-email", action="store_true", help="Send a short SMTP test email and exit.")
     parser.add_argument("--include-seen", action="store_true", help="Report all matches instead of only first-seen records.")
@@ -836,6 +1016,7 @@ def main(argv: list[str]) -> int:
     update_registry(records, args.registry_file)
     seen = load_seen(args.state_file)
     selected = records if args.include_seen else [rec for rec in records if rec.key() not in seen]
+    write_latest_csv(selected, args.latest_file)
 
     now = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     report_path = args.out_dir / f"rheum_sc_spatial_report_{now}.md"
@@ -847,7 +1028,7 @@ def main(argv: list[str]) -> int:
     save_seen(args.state_file, seen | {rec.key() for rec in records})
     if args.send_email:
         subject = f"风湿免疫单细胞/空间转录组公共数据报告：{len(build_studies(selected))} 个研究候选"
-        send_email(subject, report)
+        send_email(subject, report, attachments=[args.latest_file])
 
     print(f"records_found={len(records)}")
     print(f"records_reported={len(selected)}")
