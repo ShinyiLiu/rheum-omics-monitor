@@ -11,9 +11,6 @@ on:
   schedule:
     - cron: "0 1 1,15 * *"
 
-permissions:
-  contents: write
-
 concurrency:
   group: rheum-omics-monitor-state
   cancel-in-progress: false
@@ -22,6 +19,8 @@ jobs:
   report:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write
     env:
       SMTP_HOST: ${{ secrets.SMTP_HOST || 'smtp.qq.com' }}
       SMTP_PORT: ${{ secrets.SMTP_PORT || '465' }}
@@ -97,16 +96,18 @@ jobs:
         if: github.event_name != 'push'
         run: python rheum_omics_monitor/monitor.py --since-days 14 --retmax 40 --send-email
 
-      - name: Commit updated seen state
+      - name: Commit updated dataset registry
         if: github.event_name != 'push'
         shell: bash
         run: |
-          if git diff --quiet -- rheum_omics_monitor/seen_accessions.json; then
-            echo "seen_accessions.json unchanged; no commit needed."
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add rheum_omics_monitor/seen_accessions.json
-          git commit -m "Update seen accessions state"
-          git push
+
+          git add data/rheum_omics_datasets.csv rheum_omics_monitor/seen_accessions.json
+
+          if git diff --cached --quiet; then
+            echo "No registry/state changes to commit."
+          else
+            git commit -m "Update rheum omics dataset registry"
+            git push
+          fi
