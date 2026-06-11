@@ -1,5 +1,4 @@
 rheum_omics_monitor/.env
 rheum_omics_monitor/reports/
-rheum_omics_monitor/seen_accessions.json
 __pycache__/
 *.pyc
